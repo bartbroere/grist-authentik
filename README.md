@@ -1,6 +1,6 @@
 # Grist + Authentik — single-image stack
 
-One Docker image containing:
+This repository contains the files to build one Docker image containing:
 
 | Component  | Role                                            |
 | ---------- | ----------------------------------------------- |
@@ -9,6 +9,9 @@ One Docker image containing:
 | PostgreSQL | Authentik's database (also runs its task queue) |
 | nginx      | Reverse proxy — the only exposed port (8080)    |
 | supervisord| Process manager tying it all together           |
+
+This is combined to provide an easy way to try out Grist with accounts,
+without needing to set up and configure a separate OIDC provider.
 
 Users can **sign up themselves**: the Authentik login page shows a
 "Sign up" link (enrollment flow), and Grist is pre-wired to use
