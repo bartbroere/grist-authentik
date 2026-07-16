@@ -23,64 +23,14 @@ export AUTHENTIK_WEB__PATH="$AUTH_PATH"
 
 # ---------------------------------------------------------------------------
 # Persistent data layout (mount a volume at /data)
-#
-# Ownership is baked into the image, so a fresh named volume already has the
-# right owners and no chown is needed. Restricted environments (dropped
-# CAP_CHOWN, rootless engines, root-squashed storage) forbid chown at
-# runtime, so it is only attempted when ownership is actually wrong, and a
-# denied chown is fatal only if the service could not run anyway.
 # ---------------------------------------------------------------------------
 mkdir -p /data/postgres /data/grist/docs /data/authentik/storage
-
-owner_uid() { stat -c %u "$1"; }
-chown_hint() {
-    echo >&2 "       Recreate the volume so it inherits the image's ownership," \
-             "chown it to uid $(id -u "$1") on the host, or grant the container CAP_CHOWN."
-}
-
-# Grist and Authentik just need write access to their directories.
-for spec in grist:/data/grist authentik:/data/authentik; do
-    user=${spec%%:*} dir=${spec#*:}
-    if [ "$(owner_uid "$dir")" != "$(id -u "$user")" ]; then
-        chown -R "$user:$user" "$dir" 2>/dev/null \
-            || su -s /bin/bash "$user" -c "test -w '$dir'" || {
-            echo >&2 "ERROR: $dir is not writable by '$user' (uid $(id -u "$user"))," \
-                     "and this environment does not permit chown."
-            chown_hint "$user"
-            exit 1
-        }
-    fi
-done
-
-# PostgreSQL refuses to start unless it *owns* its data directory, so mere
-# writability is not enough here.
-if [ "$(owner_uid /data/postgres)" != "$(id -u postgres)" ]; then
-    chown postgres:postgres /data/postgres 2>/dev/null || {
-        echo >&2 "ERROR: /data/postgres is owned by uid $(owner_uid /data/postgres)," \
-                 "but PostgreSQL requires its data directory to be owned by" \
-                 "'postgres' (uid $(id -u postgres)), and this environment does not permit chown."
-        chown_hint postgres
-        exit 1
-    }
-fi
-# Run chmod as the directory's owner: that always works, even without
-# CAP_FOWNER.
-su -s /bin/bash postgres -c "chmod 700 /data/postgres"
-
-# /var/run may be a fresh tmpfs, so the build-time copy of this directory is
-# not guaranteed to survive. Postgres only creates its socket here and does
-# not care about ownership, so a /tmp-style mode is an acceptable fallback
-# (works when root just created the dir: owners may always chmod).
+chown postgres:postgres /data/postgres
+chown -R grist:grist /data/grist
+chown -R authentik:authentik /data/authentik
+chmod 700 /data/postgres
 mkdir -p /var/run/postgresql
-if [ "$(owner_uid /var/run/postgresql)" != "$(id -u postgres)" ]; then
-    chown postgres:postgres /var/run/postgresql 2>/dev/null \
-        || chmod 1777 /var/run/postgresql 2>/dev/null \
-        || su -s /bin/bash postgres -c "test -w /var/run/postgresql" || {
-        echo >&2 "ERROR: /var/run/postgresql is not writable by 'postgres'," \
-                 "and this environment does not permit chown."
-        exit 1
-    }
-fi
+chown postgres:postgres /var/run/postgresql
 
 # ---------------------------------------------------------------------------
 # Secrets: generated once, persisted in the volume
