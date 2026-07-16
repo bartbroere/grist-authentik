@@ -17,7 +17,7 @@ FROM ghcr.io/goauthentik/server:2026.2.5
 
 USER root
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends --allow-change-held-packages \
         postgresql \
         nginx \
         supervisor \
