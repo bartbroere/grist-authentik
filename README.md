@@ -73,6 +73,14 @@ path component becomes Authentik's serving prefix). The OIDC issuer,
 redirect URI and Grist app URL are derived from these variables on
 every boot.
 
+With an https `PUBLIC_AUTH_URL`, Grist's backend reaches Authentik
+through that same public URL — which resolves to the container itself —
+so nginx also listens on **port 443 inside the container**, with a
+self-signed certificate regenerated on every boot. Grist trusts it via
+`NODE_EXTRA_CA_CERTS`. This port is loopback plumbing only; don't
+publish it — external TLS still belongs in your reverse proxy or
+ingress.
+
 ## Single UID / restricted Kubernetes
 
 Every process in the container (PostgreSQL, Grist, Authentik, nginx,
@@ -110,6 +118,19 @@ the Authentik hostname must be mapped to the pod itself when
 hostAliases:
   - ip: "127.0.0.1"
     hostnames: ["auth.example.com"]
+```
+
+Kubernetes also blocks non-root processes from binding ports below 1024
+by default (Docker and podman don't), which the internal TLS listener
+on 443 needs. The entrypoint probes this and simply skips the listener
+if it can't bind — fine for plain-http setups, but with an https
+`PUBLIC_AUTH_URL` you must allow it on the pod:
+
+```yaml
+securityContext:
+  sysctls:
+    - name: net.ipv4.ip_unprivileged_port_start
+      value: "0"
 ```
 
 **Note:** volumes initialized by older (multi-user) versions of this

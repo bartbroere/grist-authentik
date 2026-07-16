@@ -36,6 +36,46 @@ AUTH_PATH="${AUTH_PATH%/}/"
 export AUTHENTIK_WEB__PATH="$AUTH_PATH"
 
 # ---------------------------------------------------------------------------
+# TLS on port 443 for loopback traffic. When PUBLIC_AUTH_URL is https, Grist's
+# backend connects to https://$AUTH_HOST/ — i.e. to nginx on 443 via the
+# /etc/hosts mapping above — so nginx needs a certificate for that name.
+# It is self-signed and regenerated on every boot (so it always matches the
+# current hostnames); Grist's Node process trusts it through
+# NODE_EXTRA_CA_CERTS, which the Dockerfile points at the .crt file.
+# External TLS termination is unaffected: 443 is not published.
+# ---------------------------------------------------------------------------
+GRIST_PUBLIC_HOST=$(printf '%s' "$PUBLIC_GRIST_URL" | sed -E 's#^https?://([^/:]+).*#\1#')
+SAN="DNS:$AUTH_HOST,DNS:localhost,IP:127.0.0.1"
+[ "$GRIST_PUBLIC_HOST" != "$AUTH_HOST" ] && SAN="DNS:$GRIST_PUBLIC_HOST,$SAN"
+openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+    -keyout /tmp/nginx-selfsigned.key -out /tmp/nginx-selfsigned.crt \
+    -subj "/CN=$AUTH_HOST" -addext "subjectAltName=$SAN" 2>/dev/null
+chmod 600 /tmp/nginx-selfsigned.key
+chmod 644 /tmp/nginx-selfsigned.crt
+
+# Binding a port below 1024 as non-root requires
+# net.ipv4.ip_unprivileged_port_start=0. Docker and podman set that inside
+# containers by default; Kubernetes does not. Probe it and only enable the
+# nginx TLS listener when it works — nginx refuses to start at all if any
+# listen directive fails, which would take plain-http setups down with it.
+if /usr/bin/python3.11 -c 'import socket; socket.socket().bind(("0.0.0.0", 443))' 2>/dev/null; then
+    cat > /tmp/nginx-tls.conf <<'EOF'
+listen 443 ssl default_server;
+ssl_certificate /tmp/nginx-selfsigned.crt;
+ssl_certificate_key /tmp/nginx-selfsigned.key;
+EOF
+else
+    : > /tmp/nginx-tls.conf
+    echo >&2 "WARNING: cannot bind port 443 as uid $(id -u); nginx will serve plain"
+    echo >&2 "         http on 8080 only. If PUBLIC_AUTH_URL is https, Grist cannot"
+    echo >&2 "         reach Authentik. In Kubernetes allow it on the pod spec:"
+    echo >&2 "           securityContext:"
+    echo >&2 "             sysctls:"
+    echo >&2 "               - name: net.ipv4.ip_unprivileged_port_start"
+    echo >&2 "                 value: \"0\""
+fi
+
+# ---------------------------------------------------------------------------
 # Persistent data layout (mount a volume at /data)
 #
 # The image ships /data owned by this uid, and a fresh named volume copies

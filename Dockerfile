@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libstdc++6 \
         ca-certificates \
         curl \
+        openssl \
     && rm -rf /var/lib/apt/lists/*
 
 # Node runtime + the Grist application, taken from the official Grist image.
@@ -94,6 +95,7 @@ ENV PORT=8484 \
     GRIST_DEFAULT_EMAIL=admin@example.com \
     GRIST_OIDC_IDP_CLIENT_ID=grist \
     GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED=true \
+    NODE_EXTRA_CA_CERTS=/tmp/nginx-selfsigned.crt \
     NODE_OPTIONS=--no-deprecation \
     NODE_ENV=production
 
