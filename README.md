@@ -70,6 +70,24 @@ path component becomes Authentik's serving prefix). The OIDC issuer,
 redirect URI and Grist app URL are derived from these variables on
 every boot.
 
+## Restrictive environments
+
+The `/data` directory layout and its ownership are baked into the image,
+so a **fresh named volume** works even where the container is not allowed
+to `chown` (e.g. `--cap-drop=ALL`, rootless engines, root-squashed
+storage): the volume inherits the image's owners on first use, and the
+entrypoint only attempts `chown` when ownership is actually wrong.
+
+Two things to know:
+
+- A volume **created by an older version of this image** may have
+  root-owned directories. With `chown` available the entrypoint fixes
+  them automatically; without it, recreate the volume or fix ownership
+  on the host (the entrypoint prints the required uid).
+- **Bind mounts** don't inherit image ownership. Either let the
+  entrypoint chown them (needs `CAP_CHOWN`) or pre-own them on the host
+  with the uids the error message reports.
+
 ## Notes & caveats
 
 - Running many services in one container is convenient but unusual;

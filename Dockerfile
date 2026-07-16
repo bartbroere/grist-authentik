@@ -41,6 +41,18 @@ RUN ldconfig
 
 RUN useradd --system --shell /usr/sbin/nologin --home-dir /data/grist grist
 
+# Bake the /data layout and its ownership into the image: a fresh named
+# volume copies the image content *including owners*, so no chown is needed
+# at runtime. Restricted environments (dropped CAP_CHOWN, rootless engines,
+# root-squashed storage) forbid runtime chown, so the entrypoint only treats
+# it as best-effort. This must precede the VOLUME declaration below —
+# changes to a path after VOLUME are discarded from the image.
+RUN mkdir -p /data/postgres /data/grist/docs /data/authentik/storage /var/run/postgresql \
+    && chown postgres:postgres /data/postgres /var/run/postgresql \
+    && chown -R grist:grist /data/grist \
+    && chown -R authentik:authentik /data/authentik \
+    && chmod 700 /data/postgres
+
 # The ak script logs to /dev/stderr, which cannot be re-opened when stderr
 # is a root-owned supervisord pipe and the process runs as "authentik".
 # Point it at the already-open fd instead.
