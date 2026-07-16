@@ -39,7 +39,18 @@ COPY --from=grist /usr/local/lib/libpython3.11.so.1.0 /usr/local/lib/libpython3.
 COPY --from=grist /usr/local/lib/python3.11 /usr/local/lib/python3.11
 RUN ldconfig
 
-RUN useradd --system --shell /usr/sbin/nologin --home-dir /data/grist grist
+# Everything runs as the base image's "authentik" user — postgres, Grist,
+# Authentik, nginx and supervisord alike. With a single uid there is never a
+# reason to chown at runtime, which restricted environments (Kubernetes with
+# a tight securityContext, rootless podman) do not permit anyway. The /data
+# layout is baked in with that owner so a fresh named volume inherits it;
+# this must precede the VOLUME declaration below. nginx's log dir is chowned
+# because nginx opens its compile-time default error log before reading the
+# config; pid files, temp files and the postgres socket live in /tmp because
+# /run is a root-owned tmpfs under podman and Kubernetes.
+RUN mkdir -p /data/postgres /data/grist/docs /data/authentik/storage \
+    && chown -R authentik:authentik /data /var/lib/nginx /var/log/nginx \
+    && chmod 700 /data/postgres
 
 # The ak script logs to /dev/stderr, which cannot be re-opened when stderr
 # is a root-owned supervisord pipe and the process runs as "authentik".
@@ -91,5 +102,7 @@ VOLUME /data
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=300s \
     CMD curl -fsS http://127.0.0.1:8080/ -o /dev/null || exit 1
+
+USER authentik
 
 ENTRYPOINT ["/entrypoint.sh"]

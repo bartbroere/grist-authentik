@@ -1,5 +1,10 @@
 #!/bin/bash
 # First-boot initialization, then hand off to supervisord.
+#
+# The whole container — this script included — runs as the single non-root
+# "authentik" user, so nothing here ever needs chown, su or any capability.
+# That keeps the image working in restricted environments (Kubernetes with a
+# tight securityContext, rootless podman).
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -12,9 +17,18 @@ export PUBLIC_AUTH_URL="${PUBLIC_AUTH_URL:-$PUBLIC_GRIST_URL/auth}"
 
 # Grist's backend talks to Authentik via the same public URL the browser
 # uses, so the auth hostname must resolve to nginx inside this container.
+# Appending to /etc/hosts requires root; when that fails the mapping must
+# come from outside (Kubernetes: pod hostAliases).
 AUTH_HOST=$(printf '%s' "$PUBLIC_AUTH_URL" | sed -E 's#^https?://([^/:]+).*#\1#')
-grep -qE "[[:space:]]$AUTH_HOST(\$|[[:space:]])" /etc/hosts \
-    || echo "127.0.0.1 $AUTH_HOST" >> /etc/hosts
+if ! grep -qE "[[:space:]]$AUTH_HOST(\$|[[:space:]])" /etc/hosts; then
+    if ! echo "127.0.0.1 $AUTH_HOST" >> /etc/hosts 2>/dev/null; then
+        echo >&2 "WARNING: /etc/hosts is not writable; $AUTH_HOST must resolve to this"
+        echo >&2 "         container some other way. In Kubernetes add to the pod spec:"
+        echo >&2 "           hostAliases:"
+        echo >&2 "             - ip: \"127.0.0.1\""
+        echo >&2 "               hostnames: [\"$AUTH_HOST\"]"
+    fi
+fi
 
 # Serve Authentik under the URL's path prefix (e.g. /auth/); "/" if none.
 AUTH_PATH=$(printf '%s' "$PUBLIC_AUTH_URL" | sed -E 's#^https?://[^/]+##')
@@ -23,14 +37,30 @@ export AUTHENTIK_WEB__PATH="$AUTH_PATH"
 
 # ---------------------------------------------------------------------------
 # Persistent data layout (mount a volume at /data)
+#
+# The image ships /data owned by this uid, and a fresh named volume copies
+# that ownership on first use. In Kubernetes, make the mounted volume
+# writable for this uid via securityContext (fsGroup — see README).
 # ---------------------------------------------------------------------------
+if [ ! -w /data ]; then
+    echo >&2 "ERROR: /data is not writable by uid $(id -u). Mount a volume this uid"
+    echo >&2 "       can write to. In Kubernetes set on the pod:"
+    echo >&2 "         securityContext: {runAsUser: $(id -u), fsGroup: $(id -g)}"
+    exit 1
+fi
 mkdir -p /data/postgres /data/grist/docs /data/authentik/storage
-chown postgres:postgres /data/postgres
-chown -R grist:grist /data/grist
-chown -R authentik:authentik /data/authentik
+
+# PostgreSQL insists on *owning* its data directory — mere writability is
+# not enough — so a volume initialized under a different uid cannot be
+# reused. (Volumes created by pre-single-uid versions of this image fall in
+# that category.)
+if [ "$(stat -c %u /data/postgres)" != "$(id -u)" ]; then
+    echo >&2 "ERROR: /data/postgres is owned by uid $(stat -c %u /data/postgres), but this"
+    echo >&2 "       container runs everything as uid $(id -u) and cannot chown. Recreate"
+    echo >&2 "       the volume, or chown it to uid $(id -u) from outside the container."
+    exit 1
+fi
 chmod 700 /data/postgres
-mkdir -p /var/run/postgresql
-chown postgres:postgres /var/run/postgresql
 
 # ---------------------------------------------------------------------------
 # Secrets: generated once, persisted in the volume
@@ -62,22 +92,24 @@ export GRIST_OIDC_IDP_CLIENT_SECRET="$GRIST_OIDC_CLIENT_SECRET"
 export GRIST_REDIRECT_URI="$PUBLIC_GRIST_URL/oauth2/callback"
 
 # ---------------------------------------------------------------------------
-# PostgreSQL: init cluster and create the authentik database on first boot
+# PostgreSQL: init cluster and create the authentik database on first boot.
+# The socket lives in /tmp (PGHOST below, -k in supervisord.conf) because
+# /run is a root-owned tmpfs under podman and Kubernetes. initdb runs as the
+# "authentik" OS user, so the cluster superuser is the "authentik" role and
+# no separate role needs creating.
 # ---------------------------------------------------------------------------
 PG_BIN=$(ls -d /usr/lib/postgresql/*/bin | head -1)
-pg_run() { su -s /bin/bash postgres -c "$1"; }
+export PGHOST=/tmp
 
 if [ ! -s /data/postgres/PG_VERSION ]; then
-    pg_run "$PG_BIN/initdb -D /data/postgres -E UTF8 --locale=C.UTF-8"
+    "$PG_BIN/initdb" -D /data/postgres -E UTF8 --locale=C.UTF-8
 fi
 rm -f /data/postgres/postmaster.pid
 
-pg_run "$PG_BIN/pg_ctl -D /data/postgres -w -o '-k /var/run/postgresql' start"
-pg_run "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='authentik'\" | grep -q 1" \
-    || pg_run "createuser authentik"
-pg_run "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='authentik'\" | grep -q 1" \
-    || pg_run "createdb -O authentik authentik"
-pg_run "$PG_BIN/pg_ctl -D /data/postgres -m fast -w stop"
+"$PG_BIN/pg_ctl" -D /data/postgres -w -o "-k /tmp" start
+psql -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='authentik'" | grep -q 1 \
+    || createdb -O authentik authentik
+"$PG_BIN/pg_ctl" -D /data/postgres -m fast -w stop
 
 echo "Starting services (first boot takes a few minutes while Authentik migrates)..."
 exec /usr/bin/supervisord -c /etc/supervisor/supervisord.conf

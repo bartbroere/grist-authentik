@@ -73,6 +73,49 @@ path component becomes Authentik's serving prefix). The OIDC issuer,
 redirect URI and Grist app URL are derived from these variables on
 every boot.
 
+## Single UID / restricted Kubernetes
+
+Every process in the container (PostgreSQL, Grist, Authentik, nginx,
+supervisord) runs as the **same non-root user** — the base image's
+`authentik` user, uid/gid **1000**. Nothing is chowned at runtime, no
+capability is needed, and pid files, temp files and the Postgres socket
+live in `/tmp` (`/run` is a root-owned tmpfs under podman and
+Kubernetes). This avoids errors like
+`chown: changing ownership of '/data/postgres': Operation not permitted`
+in clusters with a restrictive security policy.
+
+The only requirement is that the `/data` volume is writable by that uid:
+
+- **docker / podman named volume**: works out of the box — a fresh
+  volume inherits the ownership baked into the image.
+- **Kubernetes**: set `fsGroup` so the kubelet makes the volume
+  group-writable, e.g. on the pod:
+
+  ```yaml
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    runAsNonRoot: true
+  ```
+
+- **Bind mounts / hostPath**: chown the directory to uid 1000 on the
+  host (the entrypoint prints the exact uid if it can't write).
+
+Because the entrypoint can no longer edit `/etc/hosts`, in Kubernetes
+the Authentik hostname must be mapped to the pod itself when
+`PUBLIC_AUTH_URL` is a separate domain:
+
+```yaml
+hostAliases:
+  - ip: "127.0.0.1"
+    hostnames: ["auth.example.com"]
+```
+
+**Note:** volumes initialized by older (multi-user) versions of this
+image have a Postgres directory owned by a different uid and cannot be
+reused; recreate the volume or chown it from outside the container.
+
 ## Notes & caveats
 
 - Running many services in one container is convenient but unusual;
